@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.database.connection import engine
+from app.database.base import Base
 
 
 # =========================================================
@@ -64,12 +65,40 @@ async def lifespan(app: FastAPI):
 
     print("MediTrack: Starting application...")
 
+    # -----------------------------------------------------
+    # Create database tables if they do not already exist
+    # -----------------------------------------------------
+
+    try:
+        Base.metadata.create_all(bind=engine)
+
+        print("MediTrack: Database tables checked/created.")
+
+    except Exception as e:
+
+        print("MediTrack: Database table creation failed.")
+        print(f"Database error: {e}")
+
+        raise
+
+    # -----------------------------------------------------
     # Start automatic notification scheduler
+    # -----------------------------------------------------
+
     start_scheduler()
+
+    print("MediTrack: Automatic notification scheduler started.")
+    print(
+        "MediTrack: Expiry notification job scheduled "
+        "for every day at 12:00 AM IST."
+    )
 
     yield
 
+    # -----------------------------------------------------
     # Stop scheduler when application shuts down
+    # -----------------------------------------------------
+
     stop_scheduler()
 
     print("MediTrack: Application stopped.")
@@ -95,10 +124,10 @@ app.add_middleware(
     CORSMiddleware,
 
     allow_origins=[
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://medi-track-peach-rho.vercel.app"
-],
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://medi-track-peach-rho.vercel.app"
+    ],
 
     allow_credentials=True,
 
