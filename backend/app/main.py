@@ -23,6 +23,7 @@ from app.models.notification_preferences import NotificationPreference
 from app.models.consent import Consent
 from app.models.prescription import Prescription
 from app.models.prescription_medicine import PrescriptionMedicine
+from app.models.doctor import Doctor
 
 
 # =========================================================
