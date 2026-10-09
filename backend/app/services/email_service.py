@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 # SMTP EMAIL SENDER
 # =========================================================
 
-
 async def send_smtp_email(
     recipient_email: str,
     subject: str,
@@ -37,7 +36,6 @@ async def send_smtp_email(
 
     import logging
     from email.message import EmailMessage
-
     from aiosmtplib import SMTP
     from app.core.config import settings
 
@@ -45,7 +43,6 @@ async def send_smtp_email(
 
     if not settings.SMTP_HOST:
         raise ValueError("SMTP_HOST is not configured")
-
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         raise ValueError("SMTP credentials are not configured")
 
@@ -77,11 +74,7 @@ async def send_smtp_email(
 
         stage = "email submission"
         await smtp.send_message(message)
-
-        logger.info(
-            "Email submitted successfully to %s",
-            recipient_email,
-        )
+        logger.info("Email submitted successfully to %s", recipient_email)
 
     except Exception:
         logger.exception("SMTP %s failed", stage)
@@ -96,7 +89,6 @@ async def send_smtp_email(
                     "SMTP connection cleanup failed",
                     exc_info=True,
                 )
-
 
 
 # =========================================================
