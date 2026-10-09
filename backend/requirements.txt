@@ -30,3 +30,4 @@ typing_extensions==4.16.0
 tzdata==2026.5
 tzlocal==5.4.4
 uvicorn==0.53.0
+resend[async]
