@@ -53,52 +53,82 @@ logger = logging.getLogger(__name__)
 
 
 
+
 async def send_smtp_email(
     recipient_email: str,
     subject: str,
     content: str,
 ) -> None:
-    """Send email using the Resend HTTPS API.
-
-    The function name is retained so existing notification and digital
-    medicine-sheet functions do not need to change.
-    """
+    """Send email through the protected Google Apps Script service."""
     import os
-    import resend
+    import json
+    import asyncio
+    import urllib.request
+    import urllib.error
 
-    api_key = os.getenv("RESEND_API_KEY")
-    sender_email = os.getenv("RESEND_FROM_EMAIL")
+    script_url = os.getenv("GOOGLE_SCRIPT_URL")
+    secret = os.getenv("MEDI_TRACK_SECRET")
 
-    if not api_key:
-        raise RuntimeError("RESEND_API_KEY is not configured")
+    if not script_url:
+        raise RuntimeError("GOOGLE_SCRIPT_URL is not configured")
 
-    if not sender_email:
-        raise RuntimeError("RESEND_FROM_EMAIL is not configured")
+    if not secret:
+        raise RuntimeError("MEDI_TRACK_SECRET is not configured")
 
-    resend.api_key = api_key
+    payload = {
+        "secret": secret,
+        "to": recipient_email,
+        "subject": subject,
+        "text": content,
+    }
+
+    def send_request():
+        request = urllib.request.Request(
+            script_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                request, timeout=30
+            ) as response:
+                return json.loads(
+                    response.read().decode("utf-8")
+                )
+        except urllib.error.HTTPError as error:
+            details = error.read().decode(
+                "utf-8", errors="replace"
+            )
+            raise RuntimeError(
+                f"Google email service returned HTTP "
+                f"{error.code}: {details[:300]}"
+            ) from error
 
     try:
-        result = await resend.Emails.send_async(
-            {
-                "from": sender_email,
-                "to": [recipient_email],
-                "subject": subject,
-                "text": content,
-            }
-        )
+        result = await asyncio.to_thread(send_request)
 
-        if isinstance(result, dict):
-            message_id = result.get("id")
-        else:
-            message_id = getattr(result, "id", None)
+        if not result.get("success"):
+            raise RuntimeError(
+                result.get(
+                    "message",
+                    "Google email service rejected the request",
+                )
+            )
 
         logger.info(
-            "Resend accepted email request. Message ID: %s",
-            message_id or "not returned",
+            "Google email service accepted the request "
+            "for recipient %s",
+            recipient_email,
         )
+
     except Exception:
-        logger.exception("Resend email API request failed")
+        logger.exception(
+            "Google email service request failed"
+        )
         raise
+
 
 
 # =========================================================
