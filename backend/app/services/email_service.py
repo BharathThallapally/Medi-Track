@@ -1,5 +1,8 @@
+
+import logging
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from zoneinfo import ZoneInfo
 
 from aiosmtplib import SMTP
 from sqlalchemy.orm import Session
@@ -11,56 +14,89 @@ from app.models.patient import Patient
 from app.models.user import User
 from app.models.medicine import Medicine
 from app.models.medicine_batch import MedicineBatch
-
 from app.models.purchase import Purchase
 from app.models.purchase_medicine import PurchaseMedicine
 from app.models.prescription import Prescription
 from app.models.prescription_medicine import PrescriptionMedicine
 
 
+logger = logging.getLogger(__name__)
+
+
 # =========================================================
 # SMTP EMAIL SENDER
 # =========================================================
 
+
 async def send_smtp_email(
     recipient_email: str,
     subject: str,
-    content: str
-):
-    """
-    Send an email through the configured Gmail SMTP account.
-    """
+    content: str,
+) -> None:
+    """Send email using Gmail SMTP with STARTTLS."""
+
+    import logging
+    from email.message import EmailMessage
+
+    from aiosmtplib import SMTP
+    from app.core.config import settings
+
+    logger = logging.getLogger(__name__)
+
+    if not settings.SMTP_HOST:
+        raise ValueError("SMTP_HOST is not configured")
+
+    if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
+        raise ValueError("SMTP credentials are not configured")
 
     message = EmailMessage()
-
     message["From"] = settings.SMTP_FROM
     message["To"] = recipient_email
     message["Subject"] = subject
-
     message.set_content(content)
 
     smtp = SMTP(
         hostname=settings.SMTP_HOST,
-        port=settings.SMTP_PORT,
+        port=int(settings.SMTP_PORT),
         start_tls=True,
-        timeout=30
+        timeout=30,
     )
 
+    stage = "connection"
+
     try:
-
         await smtp.connect()
+        logger.info("SMTP connection established")
 
+        stage = "authentication"
         await smtp.login(
             settings.SMTP_USERNAME,
-            settings.SMTP_PASSWORD
+            settings.SMTP_PASSWORD,
         )
+        logger.info("SMTP authentication successful")
 
+        stage = "email submission"
         await smtp.send_message(message)
 
-    finally:
+        logger.info(
+            "Email submitted successfully to %s",
+            recipient_email,
+        )
 
+    except Exception:
+        logger.exception("SMTP %s failed", stage)
+        raise
+
+    finally:
         if smtp.is_connected:
-            await smtp.quit()
+            try:
+                await smtp.quit()
+            except Exception:
+                logger.warning(
+                    "SMTP connection cleanup failed",
+                    exc_info=True,
+                )
+
 
 
 # =========================================================
@@ -69,180 +105,107 @@ async def send_smtp_email(
 
 async def send_email_notification(
     db: Session,
-    notification: Notification
+    notification: Notification,
 ):
     """
-    Send an expiry-related email notification.
+    Send an expiry-related email and mark the notification
+    as SENT only after successful SMTP submission.
     """
 
-    # -----------------------------------------------------
-    # Get patient
-    # -----------------------------------------------------
-
-    patient = (
-        db.query(Patient)
-        .filter(
-            Patient.id == notification.patient_id
-        )
-        .first()
-    )
-
-    if not patient:
-        raise ValueError("Patient not found")
-
-    # -----------------------------------------------------
-    # Get patient user account
-    # -----------------------------------------------------
-
-    user = (
-        db.query(User)
-        .filter(
-            User.id == patient.user_id
-        )
-        .first()
-    )
-
-    if not user:
-        raise ValueError(
-            "Patient user account not found"
-        )
-
-    if not user.email:
-        raise ValueError(
-            "Patient email address not found"
-        )
-
-    # -----------------------------------------------------
-    # Get medicine
-    # -----------------------------------------------------
-
-    medicine = None
-
-    if notification.medicine_id:
-
-        medicine = (
-            db.query(Medicine)
-            .filter(
-                Medicine.id == notification.medicine_id
-            )
+    try:
+        patient = (
+            db.query(Patient)
+            .filter(Patient.id == notification.patient_id)
             .first()
         )
 
-    # -----------------------------------------------------
-    # Get medicine batch
-    # -----------------------------------------------------
+        if not patient:
+            raise ValueError("Patient not found")
 
-    batch = None
-
-    if notification.batch_id:
-
-        batch = (
-            db.query(MedicineBatch)
-            .filter(
-                MedicineBatch.id == notification.batch_id
-            )
+        user = (
+            db.query(User)
+            .filter(User.id == patient.user_id)
             .first()
         )
 
-    medicine_name = (
-        medicine.medicine_name
-        if medicine
-        else "Your medicine"
-    )
+        if not user or not user.email:
+            raise ValueError("Patient email address not found")
 
-    expiry_date = (
-        batch.expiry_date.strftime("%d-%m-%Y")
-        if batch and batch.expiry_date
-        else "Not available"
-    )
+        medicine = None
 
-    # -----------------------------------------------------
-    # Determine expiry message
-    # -----------------------------------------------------
+        if notification.medicine_id:
+            medicine = (
+                db.query(Medicine)
+                .filter(Medicine.id == notification.medicine_id)
+                .first()
+            )
 
-    notification_type = notification.notification_type
+        batch = None
 
-    if notification_type == "EXPIRED_TODAY":
+        if notification.batch_id:
+            batch = (
+                db.query(MedicineBatch)
+                .filter(MedicineBatch.id == notification.batch_id)
+                .first()
+            )
 
-        subject = (
-            "MediTrack - Medicine Expiry Alert"
+        medicine_name = (
+            medicine.medicine_name
+            if medicine
+            else "Your medicine"
         )
 
-        expiry_message = (
-            f'Your medicine "{medicine_name}" has '
-            f'reached its recorded expiry date today '
-            f'({expiry_date}).'
+        expiry_date = (
+            batch.expiry_date.strftime("%d-%m-%Y")
+            if batch and batch.expiry_date
+            else "Not available"
         )
 
-    elif notification_type == "EXPIRY_URGENT_1_DAY":
+        notification_type = notification.notification_type
 
-        subject = (
-            "MediTrack - Medicine Expires Tomorrow"
-        )
+        if notification_type == "EXPIRED_TODAY":
+            subject = "MediTrack - Medicine Expiry Alert"
+            expiry_message = (
+                f'Your medicine "{medicine_name}" has reached '
+                f'its recorded expiry date today ({expiry_date}).'
+            )
 
-        expiry_message = (
-            f'Your medicine "{medicine_name}" is '
-            f'scheduled to expire tomorrow '
-            f'({expiry_date}).'
-        )
+        elif notification_type == "EXPIRY_URGENT_1_DAY":
+            subject = "MediTrack - Medicine Expires Tomorrow"
+            expiry_message = (
+                f'Your medicine "{medicine_name}" is scheduled '
+                f'to expire tomorrow ({expiry_date}).'
+            )
 
-    elif notification_type == "EXPIRY_URGENT_2_DAYS":
+        elif notification_type == "EXPIRY_URGENT_2_DAYS":
+            subject = "MediTrack - Medicine Expiry Alert"
+            expiry_message = (
+                f'Your medicine "{medicine_name}" is scheduled '
+                f'to expire in 2 days ({expiry_date}).'
+            )
 
-        subject = (
-            "MediTrack - Medicine Expiry Alert"
-        )
+        elif notification_type.startswith("EXPIRY_WARNING_"):
+            subject = "MediTrack - Medicine Expiry Reminder"
+            expiry_message = (
+                f'Your medicine "{medicine_name}" is approaching '
+                f'its recorded expiry date ({expiry_date}).'
+            )
 
-        expiry_message = (
-            f'Your medicine "{medicine_name}" is '
-            f'scheduled to expire in 2 days '
-            f'({expiry_date}).'
-        )
+        elif notification_type.startswith("EXPIRED_"):
+            subject = "MediTrack - Expired Medicine Alert"
+            expiry_message = (
+                f'Your medicine "{medicine_name}" has passed '
+                f'its recorded expiry date ({expiry_date}).'
+            )
 
-    elif notification_type.startswith(
-        "EXPIRY_WARNING_"
-    ):
+        else:
+            subject = "MediTrack - Medicine Expiry Reminder"
+            expiry_message = (
+                f'Please check the recorded expiry information '
+                f'for your medicine "{medicine_name}".'
+            )
 
-        subject = (
-            "MediTrack - Medicine Expiry Reminder"
-        )
-
-        expiry_message = (
-            f'Your medicine "{medicine_name}" is '
-            f'approaching its recorded expiry date '
-            f'({expiry_date}).'
-        )
-
-    elif notification_type.startswith(
-        "EXPIRED_"
-    ):
-
-        subject = (
-            "MediTrack - Expired Medicine Alert"
-        )
-
-        expiry_message = (
-            f'Your medicine "{medicine_name}" has '
-            f'passed its recorded expiry date '
-            f'({expiry_date}).'
-        )
-
-    else:
-
-        subject = (
-            "MediTrack - Medicine Expiry Reminder"
-        )
-
-        expiry_message = (
-            f'Please check the recorded expiry '
-            f'information for your medicine '
-            f'"{medicine_name}".'
-        )
-
-    # -----------------------------------------------------
-    # Email content
-    # -----------------------------------------------------
-
-    content = f"""Hello {user.name},
+        content = f"""Hello {user.name},
 
 This is a notification from MediTrack.
 
@@ -250,39 +213,39 @@ This is a notification from MediTrack.
 
 Expiry Date: {expiry_date}
 
-Please check the medicine package and consult your pharmacist or doctor for appropriate action.
+Please check the medicine package and consult your pharmacist
+or doctor for appropriate action.
 
-This notification is generated from the medicine and expiry information recorded in MediTrack.
+This notification is generated from the medicine and expiry
+information recorded in MediTrack.
 
 Regards,
 MediTrack
 Digital Medicine Management & Reminder System
 """
 
-    # -----------------------------------------------------
-    # Send email
-    # -----------------------------------------------------
+        await send_smtp_email(
+            recipient_email=user.email,
+            subject=subject,
+            content=content,
+        )
 
-    await send_smtp_email(
-        recipient_email=user.email,
-        subject=subject,
-        content=content
-    )
+        notification.status = "SENT"
+        notification.sent_at = datetime.now(timezone.utc)
 
-    # -----------------------------------------------------
-    # Mark notification as SENT
-    # -----------------------------------------------------
+        db.commit()
+        db.refresh(notification)
 
-    notification.status = "SENT"
+        return notification
 
-    notification.sent_at = datetime.now(
-        timezone.utc
-    )
+    except Exception:
+        db.rollback()
 
-    db.commit()
-    db.refresh(notification)
-
-    return notification
+        logger.exception(
+            "Could not send expiry notification ID %s",
+            notification.id,
+        )
+        raise
 
 
 # =========================================================
@@ -291,177 +254,105 @@ Digital Medicine Management & Reminder System
 
 async def send_purchase_medicine_sheet_email(
     db: Session,
-    purchase_id: int
+    purchase_id: int,
 ):
     """
-    Send the patient a digital medicine sheet after
-    completing a medicine purchase.
+    Send the digital medicine sheet for a purchase.
 
-    The information comes from the recorded purchase,
-    prescription, medicine and batch records.
-
-    This function does NOT create or modify medical advice.
+    This function sends an email only. It does not create,
+    complete, or modify a purchase.
     """
-
-    # -----------------------------------------------------
-    # Get purchase
-    # -----------------------------------------------------
 
     purchase = (
         db.query(Purchase)
-        .filter(
-            Purchase.id == purchase_id
-        )
+        .filter(Purchase.id == purchase_id)
         .first()
     )
 
     if not purchase:
-        raise ValueError(
-            "Purchase not found"
-        )
-
-    # -----------------------------------------------------
-    # Get patient
-    # -----------------------------------------------------
+        raise ValueError("Purchase not found")
 
     patient = (
         db.query(Patient)
-        .filter(
-            Patient.id == purchase.patient_id
-        )
+        .filter(Patient.id == purchase.patient_id)
         .first()
     )
 
     if not patient:
-        raise ValueError(
-            "Patient not found"
-        )
-
-    # -----------------------------------------------------
-    # Get patient user account
-    # -----------------------------------------------------
+        raise ValueError("Patient not found")
 
     user = (
         db.query(User)
-        .filter(
-            User.id == patient.user_id
-        )
+        .filter(User.id == patient.user_id)
         .first()
     )
 
     if not user:
-        raise ValueError(
-            "Patient user account not found"
-        )
+        raise ValueError("Patient user account not found")
 
     if not user.email:
-        raise ValueError(
-            "Patient email address not found"
-        )
-
-    # -----------------------------------------------------
-    # Get purchase medicines
-    # -----------------------------------------------------
+        raise ValueError("Patient email address not found")
 
     purchase_items = (
         db.query(PurchaseMedicine)
-        .filter(
-            PurchaseMedicine.purchase_id == purchase_id
-        )
+        .filter(PurchaseMedicine.purchase_id == purchase_id)
         .all()
     )
 
     if not purchase_items:
-        raise ValueError(
-            "No medicines found for this purchase"
-        )
-
-    # -----------------------------------------------------
-    # Get prescription
-    # -----------------------------------------------------
+        raise ValueError("No medicines found for this purchase")
 
     prescription = None
 
     if purchase.prescription_id:
-
         prescription = (
             db.query(Prescription)
             .filter(
-                Prescription.id
-                == purchase.prescription_id
+                Prescription.id == purchase.prescription_id
             )
             .first()
         )
 
-    # -----------------------------------------------------
-    # Build medicine sheet
-    # -----------------------------------------------------
-
     medicine_lines = []
 
-    for index, item in enumerate(
-        purchase_items,
-        start=1
-    ):
-
+    for index, item in enumerate(purchase_items, start=1):
         medicine = (
             db.query(Medicine)
-            .filter(
-                Medicine.id == item.medicine_id
-            )
+            .filter(Medicine.id == item.medicine_id)
             .first()
         )
 
         batch = (
             db.query(MedicineBatch)
-            .filter(
-                MedicineBatch.id == item.batch_id
-            )
+            .filter(MedicineBatch.id == item.batch_id)
             .first()
         )
 
         if not medicine:
             continue
 
-        medicine_name = (
-            medicine.medicine_name
-        )
-
         batch_number = (
-            getattr(
-                batch,
-                "batch_number",
-                None
-            )
+            getattr(batch, "batch_number", None)
             if batch
             else None
         )
 
         expiry_date = (
-            batch.expiry_date.strftime(
-                "%d-%m-%Y"
-            )
+            batch.expiry_date.strftime("%d-%m-%Y")
             if batch and batch.expiry_date
             else "Not available"
         )
 
-        # -------------------------------------------------
-        # Get prescription instructions for this medicine
-        # -------------------------------------------------
-
         prescription_medicine = None
 
         if prescription:
-
             prescription_medicine = (
-                db.query(
-                    PrescriptionMedicine
-                )
+                db.query(PrescriptionMedicine)
                 .filter(
                     PrescriptionMedicine.prescription_id
                     == prescription.id,
                     PrescriptionMedicine.medicine_id
-                    == item.medicine_id
+                    == item.medicine_id,
                 )
                 .first()
             )
@@ -498,14 +389,12 @@ async def send_purchase_medicine_sheet_email(
             else "Not recorded"
         )
 
-        quantity = item.quantity
-
         medicine_lines.append(
             f"""
 Medicine {index}
 ------------------------------
 
-Medicine Name : {medicine_name}
+Medicine Name : {medicine.medicine_name}
 Batch Number  : {batch_number or "Not available"}
 Expiry Date   : {expiry_date}
 
@@ -514,54 +403,35 @@ Frequency     : {frequency}
 Timing        : {timing}
 Food          : {food_instruction}
 Duration      : {duration_days} days
-Quantity      : {quantity}
+Quantity      : {item.quantity}
 """
         )
 
     if not medicine_lines:
-        raise ValueError(
-            "No valid medicine details found"
-        )
-
-    # -----------------------------------------------------
-    # Prescription information
-    # -----------------------------------------------------
+        raise ValueError("No valid medicine details found")
 
     if prescription:
-
         prescription_date = (
-            prescription.prescription_date.strftime(
-                "%d-%m-%Y"
-            )
+            prescription.prescription_date.strftime("%d-%m-%Y")
             if prescription.prescription_date
             else "Not available"
         )
 
-        prescription_section = f"""
-PRESCRIPTION DETAILS
+        prescription_section = f"""PRESCRIPTION DETAILS
 ====================
 
-Prescription ID : {prescription.id}
+Prescription ID   : {prescription.id}
 Prescription Date : {prescription_date}
 """
-
     else:
-
-        prescription_section = """
-PRESCRIPTION DETAILS
+        prescription_section = """PRESCRIPTION DETAILS
 ====================
 
 No prescription was linked to this purchase.
 """
 
-    # -----------------------------------------------------
-    # Purchase information
-    # -----------------------------------------------------
-
     purchase_date = (
-        purchase.purchase_date.strftime(
-            "%d-%m-%Y %I:%M %p"
-        )
+        purchase.purchase_date.strftime("%d-%m-%Y %I:%M %p")
         if purchase.purchase_date
         else "Not available"
     )
@@ -572,30 +442,22 @@ No prescription was linked to this purchase.
         else "Not available"
     )
 
-    # -----------------------------------------------------
-    # Email subject
-    # -----------------------------------------------------
-
-    subject = (
-        "MediTrack - Your Digital Medicine Sheet"
-    )
-
-    # -----------------------------------------------------
-    # Email body
-    # -----------------------------------------------------
+    subject = "MediTrack - Your Digital Medicine Sheet"
 
     content = f"""Hello {user.name},
 
 Thank you for your purchase.
 
-MediTrack has created your digital medicine sheet based on the medicine, batch and prescription information recorded by the pharmacy.
+MediTrack has created your digital medicine sheet using the
+medicine, batch and prescription information recorded by
+the pharmacy.
 
 PURCHASE DETAILS
 ================
 
-Purchase ID  : {purchase.id}
-Purchase Date: {purchase_date}
-Total Amount : {total_amount}
+Purchase ID   : {purchase.id}
+Purchase Date : {purchase_date}
+Total Amount  : {total_amount}
 
 {prescription_section}
 
@@ -606,32 +468,185 @@ MEDICINE DETAILS
 IMPORTANT
 =========
 
-This digital medicine sheet contains the medicine and prescription information recorded in MediTrack.
+This sheet contains the information recorded in MediTrack.
+It does not independently change or recommend medication.
 
-MediTrack does not independently change, increase, decrease, stop or recommend any medication.
-
-Please follow the instructions recorded by your prescribing doctor/pharmacy. If you have questions about your medication, consult your doctor or pharmacist.
+Follow the instructions recorded by your prescribing doctor
+or pharmacy. Consult your doctor or pharmacist if you have
+questions about your medication.
 
 Regards,
 MediTrack
 Digital Medicine Management & Reminder System
 """
 
-    # -----------------------------------------------------
-    # Send email
-    # -----------------------------------------------------
-
     await send_smtp_email(
         recipient_email=user.email,
         subject=subject,
-        content=content
+        content=content,
+    )
+
+    logger.info(
+        "Digital medicine sheet email submitted for purchase %s",
+        purchase.id,
     )
 
     return {
-        "message": (
-            "Digital medicine sheet sent successfully"
-        ),
+        "message": "Digital medicine sheet sent successfully",
         "purchase_id": purchase.id,
         "patient_id": patient.id,
-        "email": user.email
+        "email": user.email,
     }
+
+
+# =========================================================
+# EXPIRY NOTIFICATION STAGE
+# =========================================================
+
+def get_expiry_stage(days_remaining: int):
+    """Return the expiry notification stage for a given date."""
+
+    if 10 <= days_remaining <= 15:
+        return f"EXPIRY_WARNING_{days_remaining}_DAYS"
+
+    if days_remaining == 2:
+        return "EXPIRY_URGENT_2_DAYS"
+
+    if days_remaining == 1:
+        return "EXPIRY_URGENT_1_DAY"
+
+    if days_remaining == 0:
+        return "EXPIRED_TODAY"
+
+    if -7 <= days_remaining <= -1:
+        return f"EXPIRED_{abs(days_remaining)}_DAYS"
+
+    return None
+
+
+# =========================================================
+# GENERATE EXPIRY NOTIFICATIONS
+# =========================================================
+
+def generate_expiry_notifications(db: Session):
+    """
+    Create pending expiry notifications for patients who have
+    purchased the batch, enabled the channel and granted consent.
+
+    SMS and WhatsApp records are queued only. This function
+    does not send SMS or WhatsApp messages.
+    """
+
+    from app.models.notification_preferences import (
+        NotificationPreference,
+    )
+    from app.models.consent import Consent
+
+    created_notifications = []
+
+    today = datetime.now(
+        ZoneInfo("Asia/Kolkata")
+    ).date()
+
+    batches = db.query(MedicineBatch).all()
+
+    for batch in batches:
+        if not batch.expiry_date:
+            continue
+
+        days_remaining = (batch.expiry_date - today).days
+        notification_stage = get_expiry_stage(days_remaining)
+
+        if not notification_stage:
+            continue
+
+        purchase_medicines = (
+            db.query(PurchaseMedicine)
+            .filter(PurchaseMedicine.batch_id == batch.id)
+            .all()
+        )
+
+        for purchase_medicine in purchase_medicines:
+            purchase = (
+                db.query(Purchase)
+                .filter(
+                    Purchase.id == purchase_medicine.purchase_id
+                )
+                .first()
+            )
+
+            if not purchase:
+                continue
+
+            patient_id = purchase.patient_id
+
+            preferences = (
+                db.query(NotificationPreference)
+                .filter(
+                    NotificationPreference.patient_id == patient_id
+                )
+                .first()
+            )
+
+            if not preferences:
+                continue
+
+            consent = (
+                db.query(Consent)
+                .filter(
+                    Consent.patient_id == patient_id,
+                    Consent.consent_type == "EXPIRY_NOTIFICATION",
+                    Consent.status == "GRANTED",
+                )
+                .first()
+            )
+
+            if not consent:
+                continue
+
+            now = datetime.now(timezone.utc)
+
+            channels = []
+
+            if preferences.email_enabled:
+                channels.append("EMAIL")
+
+            if preferences.sms_enabled:
+                channels.append("SMS")
+
+            if preferences.whatsapp_enabled:
+                channels.append("WHATSAPP")
+
+            for channel in channels:
+                existing = (
+                    db.query(Notification)
+                    .filter(
+                        Notification.patient_id == patient_id,
+                        Notification.batch_id == batch.id,
+                        Notification.notification_type
+                        == notification_stage,
+                        Notification.channel == channel,
+                    )
+                    .first()
+                )
+
+                if existing:
+                    continue
+
+                notification = Notification(
+                    patient_id=patient_id,
+                    medicine_id=batch.medicine_id,
+                    batch_id=batch.id,
+                    notification_type=notification_stage,
+                    channel=channel,
+                    scheduled_at=now,
+                    status="PENDING",
+                )
+
+                db.add(notification)
+                db.flush()
+                created_notifications.append(notification)
+
+    db.commit()
+
+    return created_notifications
